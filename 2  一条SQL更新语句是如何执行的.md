@@ -1,54 +1,59 @@
-## 2  一条SQL更新语句是如何执行的
+##2  一条SQL更新语句是如何执行的
 
-####redo log（重做日志）： 
+### Cue
 
-* InnoDB引擎层特有日志, 数据更新会先写redo log，再更新内存，在适当的时候，将这个操作记录到磁盘 
+什么是redo log？
 
-* 有大小，一般是一组文件，从头开始写，写到尾时就要持久化并擦除之前的记录。 
+什么是binlog？
 
-* write position ： 文件写入点；checkpoint：文件擦除点；当writepostion追上checkpoint就说明文件写满了。 
+什么是两阶段提交？
 
-* 记录的是***做了什么改动***，而不是***更新了什么状态***
+两阶段提交的意义是什么？保证任何情况下binlog和redo log的一致性
 
-####binlog（归档日志）： 
+MySQL是如何保证crash-safe的？
 
-* Server层日志，在redo log写完之后写入 
+一条SQL更新语句是如何执行的？
 
-* 记录的是原始逻辑，有两种模式，statement时记录SQL语句，rows时记录行的内容，两条，更新前和更新后
-* 不同与redo log，空间是不固定的 
+### Notes
 
-####WAL（Write-Ahead Logging）
+##### redo log
 
-即先写redo log，再写磁盘 
+* 是InnoDB引擎特有的的日志文件
+
+* 是硬盘上的一组文件，用来记录数据库做了什么修改
+
+* 采用了WAL（Write-Ahead Logging）技术，即先记录redo log，再在内存中作数据的更新，最后在适当的时候，将数据写到硬盘上。
+
+* 可以将redo log想象成一个圆，当redo log写满时，就必须擦除最早的log，同时将这些log所代表的改动写到硬盘上。
+
+* 由于MySQL先写redo log，再更新数据的这个特性，就保证了它crash-safe的这一特性
+* innodb_flush_log_at_trx_commit这个参数推荐设成1，表示每次写redo log都会直接写在磁盘上
+
+##### binlog
+
+* Server层特有的日志文件
+* redo log是物理日志，记录的是“在某个数据页上具体的修改”，binlog是逻辑日志，记录的是SQL语句的原始逻辑——“给ID为2的行的c字段+1“。可以类比为形容一栋房子，物理日志是指”XX栋XX号“，逻辑日志是指”这是Khirye买的房子“
+* binlog没有大小限制，可以一直写下去
+* sync_binlog推荐设置成1，表示每次事务的binlog都会持久到磁盘上
+
+##### 两阶段提交&UPDATE语句的执行流程
+
+1. 执行器通过引擎获取到对应行
+2. 执行器执行对应操作，例如+1，再调用引擎接口写入这行新数据
+3. 引擎将改动记录到redo log中，同时在内存中更改了对应的数据，此时redo log便处于prepare状态，表示事务随时可以提交
+4. 执行器生成这个事务的binlog，并将binlog写入磁盘
+5. 执行器调用引擎层的提交事务接口，引擎将redo log转变为commit状态，更新完成
+
+##### 两阶段提交的意义
+
+* redo log只有进入commit状态，这个事务才被引擎承认，crash重启后引擎会将redo log中记录的更改写到磁盘上，**同时，重启后处于prepare状态的事务会被回滚，对应的binlog也会被回滚掉**
+* binlog常用的作用有两个，作为备份用来恢复数据库，以及作为数据源拉起从库
 
 
 
-####Crash-safe
+### Summary
 
-有了redo log，即使mysql异常重启了，也可以通过磁盘恢复状态 
-
-####两阶段提交
-
-引擎层写完redo log后，redo log处于prepare状态，告知执行器，执行器生成对应binlog之后， 调用引擎提交事务接口，事务提交成功后，redo log处于commit状态。 
+redo log是InnoDB特有的引擎层日志，它的通过WAL机制，保证了MySQL拥有crash-safe的特性；binlog是server层的日志，引擎无关的，它与redo log配合，实现了两阶段提交，保证了数据库从crash恢复的情况下，binlog和redo log的一致性。
 
 
 
-####为什么要有两阶段提交？ 
-
-假设没有它，且在两次写日志之间数据库crash了： 
-
-* 先写redo log，再写binlog情况：数据库恢复后，通过binlog恢复时，失去了一个事务，导致对应值与原库不同了 
-
-* 先写binlog，再写redo log：数据库恢复后，多了一个事务，导致对应值与原库不同 
-
-**在写完binlog之后和事务提交成功之前这段时间内数据库crash了的话，通过binlog恢复之后，会认可这个事务，并提交这个事务。**
-
-
-
-####sync_binlog
-
-这个值设为1，可以让每次写完binlog都flush到磁盘
-
-####innodb_flush_log_at_trx_commit
-
-这个值设为1，可以让每次写完的redo log都flush到磁盘
